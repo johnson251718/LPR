@@ -1,28 +1,31 @@
 # License Plate Recognition (LPR)
 
-This project implements a Python-based license plate recognition (LPR) pipeline that
-relies purely on classical computer vision. A contour-driven detector extracts plate
-regions, while a lightweight template matcher decodes the alphanumeric content without
-requiring any Ultralytics components or heavyweight OCR dependencies.
+This project implements a modular license plate recognition (LPR) pipeline in Python.
+Out of the box it ships with a contour-based detector and template recognizer that run
+fully offline, and it can be upgraded to near-YOLO accuracy by plugging in ONNX exports
+of modern detectors and recognizers—without depending on the Ultralytics runtime.
 
 ## Features
 
-- **Robust detection** – blackhat-enhanced gradients with adaptive kernels isolate
-  rectangular plate candidates without needing external XML cascades.
-- **Template-based recognition** – characters are segmented and matched against
-  auto-generated templates, enabling fully offline operation.
-- **Image and video CLI** – process photographs or dashcam footage, optionally writing
-  annotated outputs to disk.
-- **Reproducible accuracy checks** – synthetic regression data validates that the
-  recognizer exceeds 90 % accuracy before distribution.
+- **Dual detection backends** – keep the lightweight contour detector for quick tests
+  or switch to a YOLO ONNX model powered by `cv2.dnn` for state-of-the-art plate recall.
+- **Flexible recognition** – default template matching provides zero-dependency OCR
+  while an optional CRNN/LPRNet recognizer (via `onnxruntime`) boosts transcription
+  accuracy on challenging plates.
+- **Image and video CLI** – process photographs or dashcam footage with optional
+  annotation outputs.
+- **Regression-tested quality** – a synthetic benchmark enforces ≥ 90 % accuracy to
+  guard against accidental regressions.
 
 ## Requirements
 
 - Python 3.10 or newer
 - [OpenCV](https://opencv.org/) and [NumPy](https://numpy.org/)
-- [PyTest](https://docs.pytest.org/) for running the automated accuracy check
+- [PyTest](https://docs.pytest.org/) for the regression suite
+- [ONNX Runtime](https://onnxruntime.ai/) *(optional — required only when using the
+  CRNN recognizer)*
 
-Install the Python dependencies and activate a virtual environment:
+Create a virtual environment and install the dependencies:
 
 ```bash
 python -m venv .venv
@@ -30,15 +33,35 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-No additional model downloads are required—the detector and recognizer run entirely on
-the packaged code.
+## Downloading pretrained models (optional)
+
+The classical contour/template stack works without extra assets. To reach YOLO-level
+performance you should provide pretrained ONNX models:
+
+1. **YOLO detector** – download or export a license-plate detector to ONNX (e.g. a
+   YOLOv5/YOLOv8 model trained on plates). Place the file under `resources/`:
+
+   ```bash
+   curl -L -o resources/yoloplate.onnx https://example.com/path/to/license-plate.onnx
+   ```
+
+   Any ONNX model that outputs `[x, y, w, h, obj, class_scores…]` tensors is supported.
+
+2. **CRNN/LPRNet recognizer** – obtain an ONNX transcription model trained on license
+   plates (for example an exported LPRNet or CRNN checkpoint):
+
+   ```bash
+   curl -L -o resources/lprnet.onnx https://example.com/path/to/lprnet.onnx
+   ```
+
+   Ensure you know the alphabet the model was trained on so you can pass it to the CLI.
 
 ## Usage
 
-The command-line interface is exposed via `python -m lpr.cli`. Use `--help` to inspect
-all options.
+The command-line interface is exposed via `python -m lpr.cli`. Run `--help` to view all
+options.
 
-### Image recognition
+### Contour + template pipeline (default)
 
 ```bash
 python -m lpr.cli \
@@ -46,42 +69,42 @@ python -m lpr.cli \
   --output annotated.jpg
 ```
 
-Detected plates are printed to stdout, and an annotated copy is written when `--output`
-is supplied.
-
-### Video recognition
+### YOLO detector + CRNN recognizer
 
 ```bash
 python -m lpr.cli \
-  --video path/to/dashcam.mp4 \
-  --output annotated.mp4 \
-  --max-frames 300
+  --image path/to/car.jpg \
+  --detector yolo \
+  --yolo-model resources/yoloplate.onnx \
+  --recognizer crnn \
+  --crnn-model resources/lprnet.onnx \
+  --crnn-alphabet 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ \
+  --output annotated.jpg
 ```
 
-Each frame is processed independently, and the optional `--max-frames` cap lets you
-limit work for quick experiments.
+The same arguments work with `--video` and optional `--max-frames` when processing
+dashcam footage.
 
-### Tunable thresholds
+### Notable CLI parameters
 
-- `--max-candidates` controls how many plate hypotheses per frame are sent to the
-  recognizer (default: 5).
-- `--min-character-score` sets the minimum normalized correlation score required to
-  accept individual character matches (default: 0.5).
-- Programmatic users can tweak `DetectorConfig` (area ratios, kernel sizes, padding)
-  when instantiating `LicensePlateDetector` for especially small or skewed plates.
+- `--detector` – choose between `contour` (default) and `yolo` ONNX detection.
+- `--max-candidates` – number of plate candidates per frame (default: 5).
+- `--yolo-*` – input size, confidence thresholds, and allowed class IDs for YOLO.
+- `--recognizer` – select `template` (default) or `crnn`.
+- `--min-character-score` – minimum template correlation per character.
+- `--crnn-*` – alphabet, input geometry, and thresholds for the CRNN recognizer.
 
 ## Accuracy evaluation
 
-Run the regression suite to verify that the pipeline maintains ≥ 90 % accuracy on the
-synthetic benchmark set:
+Run the regression suite to confirm the default pipeline maintains ≥ 90 % accuracy on
+synthetic plates:
 
 ```bash
 python -m pytest
 ```
 
-The test harness procedurally generates 20 plate images with varied backgrounds and
-noise, ensuring deterministic coverage of typical alphanumeric layouts. The assertion
-fails if fewer than 18 plates are decoded correctly.
+The test harness deterministically generates 20 noisy plate images and asserts that at
+least 18 are decoded correctly.
 
 ## Project structure
 
@@ -89,11 +112,12 @@ fails if fewer than 18 plates are decoded correctly.
 .
 ├── lpr
 │   ├── __init__.py            # Public package exports
-│   ├── cli.py                 # Command-line interface
-│   ├── detection.py           # Contour-driven plate detector
+│   ├── cli.py                 # Command-line interface & configuration wiring
+│   ├── detection.py           # Contour and YOLO detectors
 │   ├── pipeline.py            # High-level orchestration helpers
-│   └── recognition.py         # Template-based OCR implementation
+│   └── recognition.py         # Template and CRNN recognizers
 ├── requirements.txt           # Runtime (and test) dependencies
+├── resources/                 # Place downloaded ONNX models here (optional)
 ├── tests
 │   └── test_accuracy.py       # ≥90% accuracy regression test
 └── README.md                  # Project documentation
@@ -101,9 +125,6 @@ fails if fewer than 18 plates are decoded correctly.
 
 ## Next steps
 
-Potential extensions include:
-
-- Incorporating plate tracking across consecutive video frames to stabilize results.
-- Learning a small convolutional classifier for broader font coverage while preserving
-  offline execution.
-- Exposing the pipeline through a REST API or lightweight web interface.
+- Add multi-frame tracking to stabilize detections in video streams.
+- Integrate data-driven post-processing (e.g. region-specific plate formatting).
+- Expose the pipeline via a REST API or a lightweight UI for rapid validation.

@@ -1,13 +1,29 @@
 """License plate recognition package."""
 
-from .detection import DetectorConfig, LicensePlateDetector
-from .recognition import CharacterTemplateLibrary, LicensePlateRecognizer
+from .detection import (
+    ContourDetectorConfig,
+    ContourLicensePlateDetector,
+    LicensePlateDetector,
+    YoloDetectorConfig,
+    YoloLicensePlateDetector,
+)
 from .pipeline import PlateRecognitionPipeline
+from .recognition import (
+    CharacterTemplateLibrary,
+    CrnnPlateRecognizer,
+    CrnnRecognizerConfig,
+    LicensePlateRecognizer,
+)
 
 __all__ = [
-    "DetectorConfig",
+    "ContourDetectorConfig",
+    "ContourLicensePlateDetector",
     "LicensePlateDetector",
+    "YoloDetectorConfig",
+    "YoloLicensePlateDetector",
     "CharacterTemplateLibrary",
+    "CrnnRecognizerConfig",
+    "CrnnPlateRecognizer",
     "LicensePlateRecognizer",
     "PlateRecognitionPipeline",
 ]

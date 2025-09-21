@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Tuple
+from pathlib import Path
+from typing import Iterable, List, Sequence, Tuple
 
 import cv2
 import numpy as np
+
+try:  # Optional dependency used by the deep recognizer
+    import onnxruntime as ort
+except ImportError:  # pragma: no cover - optional dependency
+    ort = None
 
 
 @dataclass
@@ -164,4 +170,136 @@ class LicensePlateRecognizer:
         return readings
 
 
-__all__ = ["LicensePlateRecognizer", "PlateReading"]
+@dataclass
+class CrnnRecognizerConfig:
+    """Configuration for :class:`CrnnPlateRecognizer`."""
+
+    model_path: str
+    alphabet: str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    input_size: Tuple[int, int] = (32, 160)
+    mean: float = 0.5
+    std: float = 0.5
+    blank_index: int | None = None
+    providers: Sequence[str] | None = None
+    min_text_confidence: float = 0.5
+
+
+class CrnnPlateRecognizer:
+    """CTC-based recognizer backed by an ONNX CRNN/LPRNet model."""
+
+    def __init__(self, config: CrnnRecognizerConfig) -> None:
+        if ort is None:  # pragma: no cover - exercised when dependency missing
+            raise ImportError(
+                "onnxruntime is required to use CrnnPlateRecognizer. Install it "
+                "with `pip install onnxruntime`."
+            )
+
+        self.config = config
+        self.model_path = Path(config.model_path)
+        if not self.model_path.exists():
+            raise FileNotFoundError(
+                f"CRNN model not found at {self.model_path!s}. Provide an ONNX "
+                "export trained for license-plate transcription."
+            )
+
+        providers = config.providers or ort.get_available_providers()
+        self.session = ort.InferenceSession(str(self.model_path), providers=providers)
+        self.input_name = self.session.get_inputs()[0].name
+        self.input_height, self.input_width = config.input_size
+        if self.input_height <= 0 or self.input_width <= 0:
+            raise ValueError("input_size must contain positive integers")
+
+        self.alphabet = config.alphabet
+        if not self.alphabet:
+            raise ValueError("alphabet must contain at least one character")
+        self.blank_index = (
+            config.blank_index if config.blank_index is not None else len(self.alphabet)
+        )
+
+    def _prepare(self, crop: np.ndarray) -> np.ndarray:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        resized = cv2.resize(
+            gray, (self.input_width, self.input_height), interpolation=cv2.INTER_LINEAR
+        )
+        normalized = resized.astype(np.float32) / 255.0
+        normalized = (normalized - self.config.mean) / max(self.config.std, 1e-6)
+        tensor = normalized[np.newaxis, np.newaxis, :, :]
+        return tensor.astype(np.float32)
+
+    @staticmethod
+    def _softmax(logits: np.ndarray, axis: int = -1) -> np.ndarray:
+        logits = logits - np.max(logits, axis=axis, keepdims=True)
+        exp = np.exp(logits)
+        return exp / np.sum(exp, axis=axis, keepdims=True)
+
+    def _decode(self, probabilities: np.ndarray) -> Tuple[str, float]:
+        indices = np.argmax(probabilities, axis=1)
+        confidence_scores = probabilities[np.arange(probabilities.shape[0]), indices]
+        characters: List[str] = []
+        scores: List[float] = []
+        prev_index = -1
+        for index, score in zip(indices, confidence_scores):
+            if index == self.blank_index:
+                prev_index = index
+                continue
+            if index == prev_index:
+                prev_index = index
+                continue
+            if index < 0 or index >= len(self.alphabet):
+                prev_index = index
+                continue
+            characters.append(self.alphabet[index])
+            scores.append(float(score))
+            prev_index = index
+
+        if not characters:
+            return "", 0.0
+
+        confidence = float(np.mean(scores)) if scores else 0.0
+        return "".join(characters), confidence
+
+    def recognize(
+        self, frame: np.ndarray, boxes: Iterable[Tuple[int, int, int, int]]
+    ) -> List[PlateReading]:
+        readings: List[PlateReading] = []
+        for (x, y, w, h) in boxes:
+            crop = frame[y : y + h, x : x + w]
+            if crop.size == 0:
+                continue
+
+            tensor = self._prepare(crop)
+            outputs = self.session.run(None, {self.input_name: tensor})
+            logits = outputs[0]
+            if logits.ndim == 3:
+                if logits.shape[0] == 1:
+                    logits = logits[0]
+                elif logits.shape[1] == 1:
+                    logits = np.squeeze(logits, axis=1)
+                else:
+                    logits = logits[0]
+            logits = np.squeeze(logits, axis=0) if logits.ndim == 3 else logits
+            if logits.ndim != 2:
+                raise ValueError(
+                    "Unexpected CRNN output shape; expected (time, classes)."
+                )
+            if logits.shape[0] < logits.shape[1]:
+                probabilities = self._softmax(logits, axis=1)
+            else:
+                probabilities = self._softmax(logits.T, axis=1)
+            text, confidence = self._decode(probabilities)
+            if not text:
+                continue
+            if confidence < self.config.min_text_confidence:
+                continue
+            readings.append(PlateReading((x, y, w, h), text, confidence))
+
+        return readings
+
+
+__all__ = [
+    "LicensePlateRecognizer",
+    "PlateReading",
+    "CharacterTemplateLibrary",
+    "CrnnRecognizerConfig",
+    "CrnnPlateRecognizer",
+]

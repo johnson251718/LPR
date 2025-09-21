@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Tuple
+from pathlib import Path
+from typing import Iterable, List, Sequence, Tuple
 
 import cv2
 import numpy as np
 
 
 @dataclass
-class DetectorConfig:
-    """Configuration values for :class:`LicensePlateDetector`."""
+class ContourDetectorConfig:
+    """Configuration values for :class:`ContourLicensePlateDetector`."""
 
     min_plate_area: float = 1200.0
     min_plate_area_ratio: float = 0.0005
@@ -26,11 +27,11 @@ class DetectorConfig:
     max_candidates: int = 5
 
 
-class LicensePlateDetector:
+class ContourLicensePlateDetector:
     """Detects potential license plate regions using contour analysis."""
 
-    def __init__(self, config: DetectorConfig | None = None) -> None:
-        self.config = config or DetectorConfig()
+    def __init__(self, config: ContourDetectorConfig | None = None) -> None:
+        self.config = config or ContourDetectorConfig()
 
     @staticmethod
     def _validate_frame(frame: np.ndarray) -> None:
@@ -163,4 +164,179 @@ class LicensePlateDetector:
         return []
 
 
-__all__ = ["LicensePlateDetector"]
+@dataclass
+class YoloDetectorConfig:
+    """Configuration for :class:`YoloLicensePlateDetector`."""
+
+    model_path: str
+    input_size: Tuple[int, int] = (640, 640)
+    confidence_threshold: float = 0.25
+    nms_threshold: float = 0.45
+    max_candidates: int = 10
+    class_ids: Sequence[int] | None = None
+
+
+class YoloLicensePlateDetector:
+    """YOLO-based detector implemented with :mod:`cv2.dnn`.
+
+    The detector expects an ONNX export of a YOLO model that predicts license plates.
+    Only the ONNX runtime built into OpenCV is required—no Ultralytics runtime is used.
+    """
+
+    def __init__(self, config: YoloDetectorConfig) -> None:
+        self.config = config
+        self.model_path = Path(config.model_path)
+        if not self.model_path.exists():
+            raise FileNotFoundError(
+                f"YOLO model not found at {self.model_path!s}. Download an ONNX "
+                "export of a license-plate detector and provide its path via the "
+                "configuration."
+            )
+        self.net = cv2.dnn.readNetFromONNX(str(self.model_path))
+        width, height = self.config.input_size
+        if width <= 0 or height <= 0:
+            raise ValueError("input_size must contain positive integers")
+        self.input_width = int(width)
+        self.input_height = int(height)
+
+    @staticmethod
+    def _validate_frame(frame: np.ndarray) -> None:
+        if frame is None or frame.size == 0:
+            raise ValueError("frame must be a non-empty numpy array")
+
+    @staticmethod
+    def _letterbox(
+        image: np.ndarray, new_width: int, new_height: int
+    ) -> Tuple[np.ndarray, float, float, float]:
+        height, width = image.shape[:2]
+        scale = min(new_width / width, new_height / height)
+        scaled_width = int(round(width * scale))
+        scaled_height = int(round(height * scale))
+        resized = cv2.resize(image, (scaled_width, scaled_height), cv2.INTER_LINEAR)
+        canvas = np.full((new_height, new_width, 3), 114, dtype=np.uint8)
+        dw = (new_width - scaled_width) / 2.0
+        dh = (new_height - scaled_height) / 2.0
+        left = int(round(dw - 0.1))
+        right = int(round(dw + scaled_width + 0.1))
+        top = int(round(dh - 0.1))
+        bottom = int(round(dh + scaled_height + 0.1))
+        left = max(left, 0)
+        top = max(top, 0)
+        right = min(right, new_width)
+        bottom = min(bottom, new_height)
+        canvas[top:bottom, left:right] = resized
+        return canvas, scale, float(left), float(top)
+
+    def _decode_predictions(
+        self,
+        predictions: np.ndarray,
+        scale: float,
+        dw: float,
+        dh: float,
+        frame_shape: Tuple[int, int, int],
+    ) -> Tuple[List[List[int]], List[float]]:
+        predictions = predictions.reshape(-1, predictions.shape[-1])
+        frame_height, frame_width = frame_shape[:2]
+        boxes: List[List[int]] = []
+        scores: List[float] = []
+        allowed_classes = set(self.config.class_ids) if self.config.class_ids else None
+
+        for pred in predictions:
+            if pred.shape[0] < 6:
+                continue
+            objectness = float(pred[4])
+            if objectness < 1e-6:
+                continue
+            class_scores = pred[5:]
+            if class_scores.size == 0:
+                continue
+            class_id = int(np.argmax(class_scores))
+            if allowed_classes is not None and class_id not in allowed_classes:
+                continue
+            class_score = float(class_scores[class_id])
+            confidence = objectness * class_score
+            if confidence < self.config.confidence_threshold:
+                continue
+
+            cx, cy, width, height = pred[:4].astype(float)
+            x = (cx - width / 2.0 - dw) / scale
+            y = (cy - height / 2.0 - dh) / scale
+            w = width / scale
+            h = height / scale
+
+            x = max(0.0, min(x, frame_width - 1.0))
+            y = max(0.0, min(y, frame_height - 1.0))
+            w = max(1.0, min(w, frame_width - x))
+            h = max(1.0, min(h, frame_height - y))
+
+            boxes.append([int(round(x)), int(round(y)), int(round(w)), int(round(h))])
+            scores.append(confidence)
+
+        return boxes, scores
+
+    def detect(self, frame: np.ndarray) -> List[Tuple[int, int, int, int]]:
+        """Return bounding boxes for detected license plates."""
+
+        self._validate_frame(frame)
+
+        letterboxed, scale, pad_x, pad_y = self._letterbox(
+            frame, self.input_width, self.input_height
+        )
+        blob = cv2.dnn.blobFromImage(
+            letterboxed,
+            scalefactor=1.0 / 255.0,
+            size=(self.input_width, self.input_height),
+            swapRB=True,
+            crop=False,
+        )
+        self.net.setInput(blob)
+        outputs = self.net.forward()
+        if isinstance(outputs, (list, tuple)):
+            predictions = outputs[0]
+        else:
+            predictions = outputs
+
+        if predictions.ndim == 3 and predictions.shape[0] == 1:
+            predictions = predictions[0]
+
+        boxes, scores = self._decode_predictions(
+            predictions, scale, pad_x, pad_y, frame.shape
+        )
+        if not boxes:
+            return []
+
+        indices = cv2.dnn.NMSBoxes(
+            boxes,
+            scores,
+            score_threshold=self.config.confidence_threshold,
+            nms_threshold=self.config.nms_threshold,
+        )
+
+        if isinstance(indices, tuple):
+            indices = indices[0]
+
+        selected: List[Tuple[int, int, int, int]] = []
+        for idx in np.atleast_1d(indices).flatten().tolist():
+            if idx < 0 or idx >= len(boxes):
+                continue
+            selected.append(tuple(boxes[idx]))
+            if (
+                self.config.max_candidates
+                and len(selected) >= self.config.max_candidates
+            ):
+                break
+
+        return selected
+
+
+# Maintain backwards compatibility with the previous API name.
+LicensePlateDetector = ContourLicensePlateDetector
+
+
+__all__ = [
+    "ContourDetectorConfig",
+    "ContourLicensePlateDetector",
+    "YoloDetectorConfig",
+    "YoloLicensePlateDetector",
+    "LicensePlateDetector",
+]
