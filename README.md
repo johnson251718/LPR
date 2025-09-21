@@ -7,8 +7,8 @@ requiring any Ultralytics components or heavyweight OCR dependencies.
 
 ## Features
 
-- **Robust detection** – gradient filtering and contour heuristics isolate rectangular
-  plate candidates without needing external XML cascades.
+- **Robust detection** – blackhat-enhanced gradients with adaptive kernels isolate
+  rectangular plate candidates without needing external XML cascades.
 - **Template-based recognition** – characters are segmented and matched against
   auto-generated templates, enabling fully offline operation.
 - **Image and video CLI** – process photographs or dashcam footage, optionally writing
@@ -67,6 +67,8 @@ limit work for quick experiments.
   recognizer (default: 5).
 - `--min-character-score` sets the minimum normalized correlation score required to
   accept individual character matches (default: 0.5).
+- Programmatic users can tweak `DetectorConfig` (area ratios, kernel sizes, padding)
+  when instantiating `LicensePlateDetector` for especially small or skewed plates.
 
 ## Accuracy evaluation
 
