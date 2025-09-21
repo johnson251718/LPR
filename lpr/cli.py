@@ -5,33 +5,27 @@ from __future__ import annotations
 import argparse
 from typing import Sequence
 
-from .detection import LicensePlateDetector
+from .detection import DetectorConfig, LicensePlateDetector
 from .pipeline import PlateRecognitionPipeline
 from .recognition import LicensePlateRecognizer
-
-
-def _parse_languages(value: str) -> Sequence[str]:
-    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="License plate recognition demo")
     parser.add_argument(
-        "--cascade-path",
+        "--max-candidates",
+        type=int,
+        default=5,
+        help="Maximum number of candidate plates retained per frame (default: 5)",
+    )
+    parser.add_argument(
+        "--min-character-score",
+        type=float,
+        default=0.5,
         help=(
-            "Path to the Haar cascade XML. Defaults to resources/haarcascade_russian_"
-            "plate_number.xml"
+            "Minimum normalized correlation score required to accept a character "
+            "match (default: 0.5)"
         ),
-    )
-    parser.add_argument(
-        "--languages",
-        default="en",
-        help="Comma separated list of EasyOCR languages (default: en)",
-    )
-    parser.add_argument(
-        "--gpu",
-        action="store_true",
-        help="Enable GPU acceleration in EasyOCR if supported",
     )
 
     input_group = parser.add_mutually_exclusive_group(required=True)
@@ -55,13 +49,11 @@ def main(args: Sequence[str] | None = None) -> int:
     parser = build_parser()
     namespace = parser.parse_args(args=args)
 
-    try:
-        detector = LicensePlateDetector(cascade_path=namespace.cascade_path)
-    except (FileNotFoundError, ValueError) as error:
-        parser.error(str(error))
-
+    detector = LicensePlateDetector(
+        config=DetectorConfig(max_candidates=namespace.max_candidates)
+    )
     recognizer = LicensePlateRecognizer(
-        languages=_parse_languages(namespace.languages), gpu=namespace.gpu
+        min_character_score=namespace.min_character_score
     )
     pipeline = PlateRecognitionPipeline(detector=detector, recognizer=recognizer)
 

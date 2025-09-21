@@ -1,28 +1,28 @@
 # License Plate Recognition (LPR)
 
-This project provides a minimal, end-to-end license plate recognition (LPR) pipeline
-implemented in Python. It demonstrates how to combine classical computer vision for
-plate detection with OCR-based text recognition to extract the characters displayed on
-a vehicle license plate. The code base intentionally avoids any Ultralytics
-dependencies, relying instead on OpenCV and EasyOCR.
+This project implements a Python-based license plate recognition (LPR) pipeline that
+relies purely on classical computer vision. A contour-driven detector extracts plate
+regions, while a lightweight template matcher decodes the alphanumeric content without
+requiring any Ultralytics components or heavyweight OCR dependencies.
 
 ## Features
 
-- Detect license plates in still images or videos using an OpenCV Haar cascade.
-- Recognize alphanumeric content from detected plates with EasyOCR.
-- Command-line interface that can annotate outputs and prints textual results.
-- Modular architecture that separates detection, recognition, and pipeline orchestration
-  for easy extension.
+- **Robust detection** – gradient filtering and contour heuristics isolate rectangular
+  plate candidates without needing external XML cascades.
+- **Template-based recognition** – characters are segmented and matched against
+  auto-generated templates, enabling fully offline operation.
+- **Image and video CLI** – process photographs or dashcam footage, optionally writing
+  annotated outputs to disk.
+- **Reproducible accuracy checks** – synthetic regression data validates that the
+  recognizer exceeds 90 % accuracy before distribution.
 
 ## Requirements
 
-- Python 3.10 or newer.
-- [OpenCV](https://opencv.org/) and [EasyOCR](https://github.com/JaidedAI/EasyOCR)
-  Python packages.
-- A Haar cascade XML file for license plate detection. The pipeline expects the file at
-  `resources/haarcascade_russian_plate_number.xml` (see below).
+- Python 3.10 or newer
+- [OpenCV](https://opencv.org/) and [NumPy](https://numpy.org/)
+- [PyTest](https://docs.pytest.org/) for running the automated accuracy check
 
-Install the Python dependencies:
+Install the Python dependencies and activate a virtual environment:
 
 ```bash
 python -m venv .venv
@@ -30,20 +30,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Download the OpenCV Haar cascade for license plates:
-
-```bash
-curl -L -o resources/haarcascade_russian_plate_number.xml \
-  https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_russian_plate_number.xml
-```
-
-> **Note:** If direct downloads are blocked, manually retrieve the XML file from the
-> OpenCV repository and place it in the `resources/` directory.
+No additional model downloads are required—the detector and recognizer run entirely on
+the packaged code.
 
 ## Usage
 
-The project exposes a CLI entry point through `python -m lpr.cli`. Run
-`python -m lpr.cli --help` to inspect all available options.
+The command-line interface is exposed via `python -m lpr.cli`. Use `--help` to inspect
+all options.
 
 ### Image recognition
 
@@ -53,8 +46,8 @@ python -m lpr.cli \
   --output annotated.jpg
 ```
 
-The command prints any detected plate texts to the console and, if `--output` is
-provided, writes an annotated copy of the image showing the detections.
+Detected plates are printed to stdout, and an annotated copy is written when `--output`
+is supplied.
 
 ### Video recognition
 
@@ -65,35 +58,50 @@ python -m lpr.cli \
   --max-frames 300
 ```
 
-The pipeline processes each frame, aggregates detections, and optionally writes an
-annotated video. Use `--max-frames` during testing to restrict the processing window.
+Each frame is processed independently, and the optional `--max-frames` cap lets you
+limit work for quick experiments.
 
-### Advanced options
+### Tunable thresholds
 
-- `--languages` lets you specify a comma-separated list of EasyOCR language codes
-  (default: `en`).
-- `--gpu` toggles GPU acceleration in EasyOCR when a supported GPU is available.
-- `--cascade-path` allows pointing to a custom Haar cascade XML file.
+- `--max-candidates` controls how many plate hypotheses per frame are sent to the
+  recognizer (default: 5).
+- `--min-character-score` sets the minimum normalized correlation score required to
+  accept individual character matches (default: 0.5).
+
+## Accuracy evaluation
+
+Run the regression suite to verify that the pipeline maintains ≥ 90 % accuracy on the
+synthetic benchmark set:
+
+```bash
+python -m pytest
+```
+
+The test harness procedurally generates 20 plate images with varied backgrounds and
+noise, ensuring deterministic coverage of typical alphanumeric layouts. The assertion
+fails if fewer than 18 plates are decoded correctly.
 
 ## Project structure
 
 ```
 .
 ├── lpr
-│   ├── cli.py                # Command-line interface
-│   ├── detection.py          # Haar cascade detection utilities
-│   ├── pipeline.py           # High-level pipeline orchestration
-│   └── recognition.py        # EasyOCR text recognition helpers
-├── resources                 # Expected location for cascade files and assets
-├── requirements.txt          # Python dependencies
-└── README.md                 # Project documentation
+│   ├── __init__.py            # Public package exports
+│   ├── cli.py                 # Command-line interface
+│   ├── detection.py           # Contour-driven plate detector
+│   ├── pipeline.py            # High-level orchestration helpers
+│   └── recognition.py         # Template-based OCR implementation
+├── requirements.txt           # Runtime (and test) dependencies
+├── tests
+│   └── test_accuracy.py       # ≥90% accuracy regression test
+└── README.md                  # Project documentation
 ```
 
 ## Next steps
 
-This repository is intentionally lightweight and can serve as a starting point for
-more advanced LPR systems. Potential enhancements include:
+Potential extensions include:
 
-- Training a custom object detector tailored to a specific region or plate format.
-- Incorporating plate tracking across video frames to increase stability.
-- Adding a REST API or web interface to expose the recognition pipeline as a service.
+- Incorporating plate tracking across consecutive video frames to stabilize results.
+- Learning a small convolutional classifier for broader font coverage while preserving
+  offline execution.
+- Exposing the pipeline through a REST API or lightweight web interface.
